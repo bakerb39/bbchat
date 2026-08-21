@@ -3,6 +3,7 @@ const CONVERSATION_REFRESH_MS = 6000;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const ALLOWED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 const REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🎉'];
+const E2EE_MIME = 'application/x-bbchat-e2ee';
 
 function readSeenMap() {
   try {
@@ -26,7 +27,8 @@ const state = {
   conversationTimer: null,
   fetchingMessages: false,
   pendingImage: null,
-  editingMessageId: null
+  editingMessageId: null,
+  cryptoKeys: new Map()
 };
 
 const el = {
@@ -44,6 +46,7 @@ const el = {
   removeImageBtn: document.getElementById('removeImageBtn'),
   pollingToggle: document.getElementById('pollingToggle'),
   refreshBtn: document.getElementById('refreshBtn'),
+  encryptionBtn: document.getElementById('encryptionBtn'),
   deleteConversationBtn: document.getElementById('deleteConversationBtn'),
   displayNameLabel: document.getElementById('displayNameLabel'),
   changeNameBtn: document.getElementById('changeNameBtn'),
@@ -56,6 +59,83 @@ const el = {
   conversationInput: document.getElementById('conversationInput'),
   cancelConversationBtn: document.getElementById('cancelConversationBtn')
 };
+
+
+function bytesToBase64(bytes) {
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  return btoa(binary);
+}
+
+function base64ToBytes(value) {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+function passphraseStorageKey(conversationId) {
+  return `bbchat.e2ee.passphrase.${conversationId}`;
+}
+
+async function deriveConversationKey(passphrase, conversationId) {
+  const material = await crypto.subtle.importKey('raw', new TextEncoder().encode(passphrase), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({
+    name: 'PBKDF2',
+    salt: new TextEncoder().encode(`BBChat-E2EE-v1|${conversationId}`),
+    iterations: 250000,
+    hash: 'SHA-256'
+  }, material, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+
+async function getConversationKey(conversationId, { promptIfMissing = false } = {}) {
+  if (state.cryptoKeys.has(conversationId)) return state.cryptoKeys.get(conversationId);
+  let passphrase = sessionStorage.getItem(passphraseStorageKey(conversationId)) || '';
+  if (!passphrase && promptIfMissing) {
+    passphrase = window.prompt('Enter the shared encryption passphrase for this chat. Share it with the other participant outside BB Chat. It is kept only for this browser session.') || '';
+    if (passphrase && passphrase.length < 10) {
+      setStatus('Use an encryption passphrase of at least 10 characters.');
+      return null;
+    }
+    if (passphrase) sessionStorage.setItem(passphraseStorageKey(conversationId), passphrase);
+  }
+  if (!passphrase) return null;
+  const key = await deriveConversationKey(passphrase, conversationId);
+  state.cryptoKeys.set(conversationId, key);
+  return key;
+}
+
+async function encryptEnvelope(conversationId, payload) {
+  const key = await getConversationKey(conversationId, { promptIfMissing: true });
+  if (!key) return null;
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const plain = new TextEncoder().encode(JSON.stringify(payload));
+  const cipher = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plain));
+  const packed = new Uint8Array(iv.length + cipher.length);
+  packed.set(iv, 0); packed.set(cipher, iv.length);
+  return bytesToBase64(packed);
+}
+
+async function decryptMessage(message) {
+  if (message.image_mime !== E2EE_MIME || !message.image_data || message.deleted_at) return message;
+  const key = await getConversationKey(Number(message.conversation_id));
+  if (!key) return { ...message, body: '', image_data: null, image_mime: null, image_name: null, _locked: true, _encryptedData: message.image_data };
+  try {
+    const packed = base64ToBytes(message.image_data);
+    const iv = packed.slice(0, 12);
+    const cipher = packed.slice(12);
+    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, cipher);
+    const payload = JSON.parse(new TextDecoder().decode(plain));
+    return { ...message, body: payload.body || '', image_data: payload.imageData ? payload.imageData.split(',')[1] : null, image_mime: payload.imageType || null, image_name: payload.imageName || null, _encryptedData: message.image_data, _encrypted: true };
+  } catch {
+    return { ...message, body: '', image_data: null, image_mime: null, image_name: null, _locked: true, _encryptedData: message.image_data };
+  }
+}
+
+async function decryptMessages(messages) {
+  return Promise.all(messages.map(decryptMessage));
+}
 
 function setStatus(text) {
   el.connectionStatus.textContent = text;
@@ -479,6 +559,11 @@ function createMessageNode(message) {
     deleted.className = 'message-body deleted-message-body';
     deleted.textContent = 'This message was deleted.';
     content.appendChild(deleted);
+  } else if (message._locked) {
+    const locked = document.createElement('div');
+    locked.className = 'message-body';
+    locked.textContent = '🔒 Encrypted message — use Encryption to unlock';
+    content.appendChild(locked);
   } else if (Number(message.id) === state.editingMessageId) {
     content.appendChild(createEditContent(message));
     const image = createMessageImage(message);
@@ -565,7 +650,8 @@ async function refreshMessages({ forceAll = false, scroll = false, silent = fals
       state.editingMessageId = null;
     }
 
-    reconcileMessages(result.messages, { scroll });
+    const decryptedMessages = await decryptMessages(result.messages);
+    reconcileMessages(decryptedMessages, { scroll });
     state.lastSyncAt = result.syncTime;
 
     if (!state.renderedMessageIds.size) {
@@ -591,15 +677,19 @@ async function sendMessage() {
   setStatus('Sending…');
 
   try {
-    const message = await api(`/api/conversations/${state.activeConversationId}/messages`, {
-      method: 'POST',
-      body: JSON.stringify({
-        sender: state.displayName,
-        body,
-        imageData: image?.dataUrl || null,
-        imageName: image?.name || null
-      })
+    const encryptedData = await encryptEnvelope(state.activeConversationId, {
+      body,
+      imageData: image?.dataUrl || null,
+      imageName: image?.name || null,
+      imageType: image?.type || null
     });
+    if (!encryptedData) return;
+
+    const rawMessage = await api(`/api/conversations/${state.activeConversationId}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ sender: state.displayName, encryptedData })
+    });
+    const message = await decryptMessage(rawMessage);
 
     reconcileMessages([message], { scroll: true });
     el.messageInput.value = '';
@@ -616,7 +706,7 @@ async function sendMessage() {
 
 function beginEditMessage(messageId) {
   const message = state.messagesById.get(messageId);
-  if (!message || !isMine(message) || message.deleted_at) return;
+  if (!message || !isMine(message) || message.deleted_at || message._locked) return;
 
   if (state.editingMessageId && state.editingMessageId !== messageId) {
     const previous = state.messagesById.get(state.editingMessageId);
@@ -648,10 +738,19 @@ async function saveEditMessage(messageId, nextBody) {
 
   setStatus('Saving edit…');
   try {
-    const updated = await api(`/api/conversations/${state.activeConversationId}/messages/${messageId}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ sender: state.displayName, body })
+    const imageData = message.image_data && message.image_mime ? `data:${message.image_mime};base64,${message.image_data}` : null;
+    const encryptedData = await encryptEnvelope(state.activeConversationId, {
+      body,
+      imageData,
+      imageName: message.image_name || null,
+      imageType: message.image_mime || null
     });
+    if (!encryptedData) return;
+    const rawUpdated = await api(`/api/conversations/${state.activeConversationId}/messages/${messageId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ sender: state.displayName, encryptedData })
+    });
+    const updated = await decryptMessage(rawUpdated);
     state.editingMessageId = null;
     reconcileMessages([updated]);
     await loadConversations({ preserveStatus: true });
@@ -805,6 +904,17 @@ el.conversationForm.addEventListener('submit', async event => {
 el.cancelConversationBtn.addEventListener('click', () => el.conversationDialog.close());
 el.newConversationBtn.addEventListener('click', showConversationDialog);
 el.changeNameBtn.addEventListener('click', showNameDialog);
+el.encryptionBtn.addEventListener('click', async () => {
+  if (!state.activeConversationId) return;
+  const passphrase = window.prompt('Enter the shared encryption passphrase for this chat (at least 10 characters). It is kept only for this browser session.') || '';
+  if (!passphrase) return;
+  if (passphrase.length < 10) return setStatus('Use an encryption passphrase of at least 10 characters.');
+  sessionStorage.setItem(passphraseStorageKey(state.activeConversationId), passphrase);
+  state.cryptoKeys.delete(state.activeConversationId);
+  await getConversationKey(state.activeConversationId);
+  await refreshMessages({ forceAll: true, scroll: false, silent: true });
+  setStatus('🔒 End-to-end encryption unlocked for this session');
+});
 el.refreshBtn.addEventListener('click', () => refreshMessages({ scroll: false }));
 el.deleteConversationBtn.addEventListener('click', deleteConversation);
 el.sendBtn.addEventListener('click', sendMessage);

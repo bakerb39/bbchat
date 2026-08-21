@@ -10,6 +10,8 @@ const useMemoryStore = !databaseUrl && !isRender;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const ALLOWED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 const ALLOWED_REACTIONS = new Set(['👍', '❤️', '😂', '😮', '😢', '🎉']);
+const E2EE_MIME = 'application/x-bbchat-e2ee';
+const MAX_ENCRYPTED_BYTES = 7 * 1024 * 1024;
 
 app.disable('x-powered-by');
 app.use(express.json({ limit: '8mb' }));
@@ -67,6 +69,14 @@ function parseImageDataUrl(value) {
   if (buffer.length > MAX_IMAGE_BYTES) throw new Error('Images must be 5 MB or smaller.');
 
   return { mime, buffer };
+}
+
+function parseEncryptedData(value) {
+  if (!value) return null;
+  if (typeof value !== 'string' || !/^[A-Za-z0-9+/=]+$/.test(value)) throw new Error('Invalid encrypted message.');
+  const buffer = Buffer.from(value, 'base64');
+  if (!buffer.length || buffer.length > MAX_ENCRYPTED_BYTES) throw new Error('Encrypted message is too large.');
+  return buffer;
 }
 
 function normalizeReactions(value) {
@@ -258,6 +268,7 @@ function memoryConversationSummary(conversation) {
   if (latest) {
     if (latest.deleted_at) preview = 'Message deleted';
     else if (latest.body) preview = latest.body.slice(0, 100);
+    else if (latest.image_mime === E2EE_MIME) preview = '🔒 Encrypted message';
     else if (latest.image_data) preview = '📷 Photo';
   }
 
@@ -299,6 +310,7 @@ app.get('/api/conversations', async (_req, res, next) => {
           SELECT CASE
             WHEN m2.deleted_at IS NOT NULL THEN 'Message deleted'
             WHEN NULLIF(m2.body, '') IS NOT NULL THEN LEFT(m2.body, 100)
+            WHEN m2.image_mime = '${E2EE_MIME}' THEN '🔒 Encrypted message'
             WHEN m2.image_data IS NOT NULL THEN '📷 Photo'
             ELSE ''
           END
@@ -454,14 +466,16 @@ app.post('/api/conversations/:id/messages', async (req, res, next) => {
     const body = cleanString(req.body.body, 4000);
     const imageName = cleanString(req.body.imageName, 255);
     let image = null;
+    let encryptedData = null;
 
     try {
-      image = parseImageDataUrl(req.body.imageData);
+      encryptedData = parseEncryptedData(req.body.encryptedData);
+      image = encryptedData ? null : parseImageDataUrl(req.body.imageData);
     } catch (error) {
       return res.status(400).json({ error: error.message });
     }
 
-    if (!conversationId || !sender || (!body && !image)) {
+    if (!conversationId || !sender || (!body && !image && !encryptedData)) {
       return res.status(400).json({ error: 'Conversation, sender, and either a message or photo are required.' });
     }
 
@@ -474,15 +488,15 @@ app.post('/api/conversations/:id/messages', async (req, res, next) => {
         id: memory.nextMessageId++,
         conversation_id: conversationId,
         sender,
-        body,
+        body: encryptedData ? '' : body,
         created_at: now,
         updated_at: now,
         edited_at: null,
         deleted_at: null,
         reactions: {},
-        image_data: image?.buffer || null,
-        image_mime: image?.mime || null,
-        image_name: imageName || null
+        image_data: encryptedData || image?.buffer || null,
+        image_mime: encryptedData ? E2EE_MIME : (image?.mime || null),
+        image_name: encryptedData ? null : (imageName || null)
       };
       memory.messages.push(row);
       return res.status(201).json(serializeMessage(row));
@@ -495,7 +509,7 @@ app.post('/api/conversations/:id/messages', async (req, res, next) => {
        WHERE id = $1
        RETURNING id, conversation_id, sender, body, created_at, updated_at, edited_at, deleted_at,
                  reactions, image_data, image_mime, image_name`,
-      [conversationId, sender, body, image?.buffer || null, image?.mime || null, imageName || null]
+      [conversationId, sender, encryptedData ? '' : body, encryptedData || image?.buffer || null, encryptedData ? E2EE_MIME : (image?.mime || null), encryptedData ? null : (imageName || null)]
     );
 
     if (!result.rowCount) {
@@ -514,6 +528,9 @@ app.patch('/api/conversations/:conversationId/messages/:messageId', async (req, 
     const messageId = toPositiveInt(req.params.messageId);
     const sender = cleanString(req.body.sender, 80);
     const body = cleanString(req.body.body, 4000);
+    let encryptedData = null;
+    try { encryptedData = parseEncryptedData(req.body.encryptedData); }
+    catch (error) { return res.status(400).json({ error: error.message }); }
 
     if (!conversationId || !messageId || !sender) {
       return res.status(400).json({ error: 'Conversation, message, and sender are required.' });
@@ -524,10 +541,11 @@ app.patch('/api/conversations/:conversationId/messages/:messageId', async (req, 
       if (!row) return res.status(404).json({ error: 'Message not found.' });
       if (row.sender !== sender) return res.status(403).json({ error: 'You can only edit your own messages.' });
       if (row.deleted_at) return res.status(410).json({ error: 'That message has already been deleted.' });
-      if (!body && !row.image_data) return res.status(400).json({ error: 'A message cannot be empty.' });
+      if (!body && !encryptedData && !row.image_data) return res.status(400).json({ error: 'A message cannot be empty.' });
 
       const now = new Date().toISOString();
-      row.body = body;
+      row.body = encryptedData ? '' : body;
+      if (encryptedData) { row.image_data = encryptedData; row.image_mime = E2EE_MIME; row.image_name = null; }
       row.edited_at = now;
       row.updated_at = now;
       return res.json(serializeMessage(row));
@@ -543,15 +561,15 @@ app.patch('/api/conversations/:conversationId/messages/:messageId', async (req, 
     if (!existing.rowCount) return res.status(404).json({ error: 'Message not found.' });
     if (existing.rows[0].sender !== sender) return res.status(403).json({ error: 'You can only edit your own messages.' });
     if (existing.rows[0].deleted_at) return res.status(410).json({ error: 'That message has already been deleted.' });
-    if (!body && !existing.rows[0].image_data) return res.status(400).json({ error: 'A message cannot be empty.' });
+    if (!body && !encryptedData && !existing.rows[0].image_data) return res.status(400).json({ error: 'A message cannot be empty.' });
 
     const result = await pool.query(
       `UPDATE bbchat_messages
-       SET body = $3, edited_at = NOW(), updated_at = NOW()
+       SET body = $3, image_data = COALESCE($4, image_data), image_mime = CASE WHEN $4 IS NOT NULL THEN $5 ELSE image_mime END, image_name = CASE WHEN $4 IS NOT NULL THEN NULL ELSE image_name END, edited_at = NOW(), updated_at = NOW()
        WHERE id = $1 AND conversation_id = $2
        RETURNING id, conversation_id, sender, body, created_at, updated_at, edited_at, deleted_at,
                  reactions, image_data, image_mime, image_name`,
-      [messageId, conversationId, body]
+      [messageId, conversationId, encryptedData ? '' : body, encryptedData, encryptedData ? E2EE_MIME : null]
     );
 
     res.json(serializeMessage(result.rows[0]));

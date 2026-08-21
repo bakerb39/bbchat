@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>BB Chat</title>
-  <link rel="stylesheet" href="/styles.css?v=1.4.1">
+  <link rel="stylesheet" href="/styles.css?v=1.5.0">
 </head>
 <body>
   <div class="app-shell">
@@ -36,6 +36,7 @@
             <input id="pollingToggle" type="checkbox">
             <span>Auto-refresh</span>
           </label>
+          <button id="encryptionBtn" class="secondary-button" type="button" title="Set the shared end-to-end encryption passphrase">🔒 Encryption</button>
           <button id="refreshBtn" class="secondary-button" type="button">Refresh</button>
           <button id="deleteConversationBtn" class="danger-button" type="button" disabled>Delete chat</button>
         </div>
@@ -89,6 +90,6 @@
     </form>
   </dialog>
 
-  <script src="/app.js?v=1.4.1" defer></script>
+  <script src="/app.js?v=1.5.0" defer></script>
 </body>
 </html>

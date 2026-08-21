@@ -48,6 +48,10 @@ const el = {
   pollingToggle: document.getElementById('pollingToggle'),
   refreshBtn: document.getElementById('refreshBtn'),
   encryptionBtn: document.getElementById('encryptionBtn'),
+  encryptionDialog: document.getElementById('encryptionDialog'),
+  encryptionForm: document.getElementById('encryptionForm'),
+  encryptionInput: document.getElementById('encryptionInput'),
+  cancelEncryptionBtn: document.getElementById('cancelEncryptionBtn'),
   deleteConversationBtn: document.getElementById('deleteConversationBtn'),
   displayNameLabel: document.getElementById('displayNameLabel'),
   changeNameBtn: document.getElementById('changeNameBtn'),
@@ -80,6 +84,22 @@ function passphraseStorageKey(conversationId) {
   return `bbchat.e2ee.passphrase.${conversationId}`;
 }
 
+function encryptionEnabledStorageKey(conversationId) {
+  return `bbchat.e2ee.enabled.${conversationId}`;
+}
+
+function isEncryptionEnabled(conversationId) {
+  const id = Number(conversationId);
+  return !!id && sessionStorage.getItem(encryptionEnabledStorageKey(id)) === 'true';
+}
+
+function setEncryptionEnabled(conversationId, enabled) {
+  const id = Number(conversationId);
+  if (!id) return;
+  if (enabled) sessionStorage.setItem(encryptionEnabledStorageKey(id), 'true');
+  else sessionStorage.removeItem(encryptionEnabledStorageKey(id));
+}
+
 async function deriveConversationKey(passphrase, conversationId) {
   const material = await crypto.subtle.importKey('raw', new TextEncoder().encode(passphrase), 'PBKDF2', false, ['deriveKey']);
   return crypto.subtle.deriveKey({
@@ -106,7 +126,7 @@ async function getConversationKey(conversationId) {
 async function encryptEnvelope(conversationId, payload) {
   const key = await getConversationKey(conversationId);
   if (!key) {
-    setStatus('🔒 Click Encryption once to unlock this chat before sending.');
+    setStatus('Encryption is on but this chat is not unlocked. Click Encryption to unlock it.');
     return null;
   }
   const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -306,6 +326,7 @@ async function selectConversation(id) {
 
   state.activeConversationId = id;
   localStorage.setItem('qnc.activeConversationId', String(id));
+  updateEncryptionButton();
   state.lastMessageId = 0;
   state.lastSyncAt = null;
   state.renderedMessageIds.clear();
@@ -677,18 +698,33 @@ async function sendMessage() {
   setStatus('Sending…');
 
   try {
-    const encryptedData = await encryptEnvelope(state.activeConversationId, {
-      body,
-      imageData: image?.dataUrl || null,
-      imageName: image?.name || null,
-      imageType: image?.type || null
-    });
-    if (!encryptedData) return;
+    const encryptionEnabled = isEncryptionEnabled(state.activeConversationId);
+    let rawMessage;
 
-    const rawMessage = await api(`/api/conversations/${state.activeConversationId}/messages`, {
-      method: 'POST',
-      body: JSON.stringify({ sender: state.displayName, encryptedData })
-    });
+    if (encryptionEnabled) {
+      const encryptedData = await encryptEnvelope(state.activeConversationId, {
+        body,
+        imageData: image?.dataUrl || null,
+        imageName: image?.name || null,
+        imageType: image?.type || null
+      });
+      if (!encryptedData) return;
+      rawMessage = await api(`/api/conversations/${state.activeConversationId}/messages`, {
+        method: 'POST',
+        body: JSON.stringify({ sender: state.displayName, encryptedData })
+      });
+    } else {
+      rawMessage = await api(`/api/conversations/${state.activeConversationId}/messages`, {
+        method: 'POST',
+        body: JSON.stringify({
+          sender: state.displayName,
+          body,
+          imageData: image?.dataUrl || null,
+          imageName: image?.name || null
+        })
+      });
+    }
+
     const message = await decryptMessage(rawMessage);
 
     reconcileMessages([message], { scroll: true });
@@ -904,18 +940,59 @@ el.conversationForm.addEventListener('submit', async event => {
 el.cancelConversationBtn.addEventListener('click', () => el.conversationDialog.close());
 el.newConversationBtn.addEventListener('click', showConversationDialog);
 el.changeNameBtn.addEventListener('click', showNameDialog);
+function updateEncryptionButton() {
+  const id = Number(state.activeConversationId);
+  const enabled = isEncryptionEnabled(id);
+  el.encryptionBtn.textContent = enabled ? '🔒 Encrypted · v1.7.0' : '🔓 Encryption Off · v1.7.0';
+  el.encryptionBtn.title = enabled ? 'Click to turn encryption off' : 'Click to turn encryption on';
+}
+
 el.encryptionBtn.addEventListener('click', async () => {
-  if (!state.activeConversationId) return;
-  const passphrase = window.prompt('Enter the shared encryption passphrase for this chat (at least 10 characters). It is kept only for this browser session.') || '';
-  if (!passphrase) return;
+  const conversationId = Number(state.activeConversationId);
+  if (!conversationId) return;
+
+  if (isEncryptionEnabled(conversationId)) {
+    setEncryptionEnabled(conversationId, false);
+    updateEncryptionButton();
+    setStatus('Encryption off · new messages will send normally');
+    return;
+  }
+
+  const existingKey = await getConversationKey(conversationId);
+  if (existingKey) {
+    setEncryptionEnabled(conversationId, true);
+    updateEncryptionButton();
+    setStatus('🔒 Encryption on for new messages');
+    return;
+  }
+
+  el.encryptionInput.value = '';
+  el.encryptionDialog.showModal();
+  setTimeout(() => el.encryptionInput.focus(), 0);
+});
+
+el.cancelEncryptionBtn.addEventListener('click', () => el.encryptionDialog.close());
+
+el.encryptionForm.addEventListener('submit', async event => {
+  event.preventDefault();
+  const passphrase = el.encryptionInput.value;
   if (passphrase.length < 10) return setStatus('Use an encryption passphrase of at least 10 characters.');
   const conversationId = Number(state.activeConversationId);
-  state.cryptoPassphrases.set(conversationId, passphrase);
-  sessionStorage.setItem(passphraseStorageKey(conversationId), passphrase);
-  const key = await deriveConversationKey(passphrase, conversationId);
-  state.cryptoKeys.set(conversationId, key);
-  await refreshMessages({ forceAll: true, scroll: false, silent: true });
-  setStatus('🔒 End-to-end encryption unlocked for this session');
+  if (!conversationId) return;
+
+  try {
+    const key = await deriveConversationKey(passphrase, conversationId);
+    state.cryptoPassphrases.set(conversationId, passphrase);
+    state.cryptoKeys.set(conversationId, key);
+    sessionStorage.setItem(passphraseStorageKey(conversationId), passphrase);
+    setEncryptionEnabled(conversationId, true);
+    el.encryptionDialog.close();
+    updateEncryptionButton();
+    await refreshMessages({ forceAll: true, scroll: false, silent: true });
+    setStatus('🔒 Encryption on · passphrase remembered for this browser session');
+  } catch (error) {
+    setStatus(`Encryption could not be enabled: ${error.message}`);
+  }
 });
 el.refreshBtn.addEventListener('click', () => refreshMessages({ scroll: false }));
 el.deleteConversationBtn.addEventListener('click', deleteConversation);

@@ -346,8 +346,18 @@ async function selectConversation(id) {
   await refreshMessages({ forceAll: true, scroll: true });
 }
 
+function normalizeIdentity(value) {
+  return String(value || '').normalize('NFKC').trim().toLocaleLowerCase();
+}
+
+function currentDisplayName() {
+  return state.displayName || localStorage.getItem('qnc.displayName') || '';
+}
+
 function isMine(message) {
-  return message.sender === state.displayName && message.sender !== 'System';
+  const sender = normalizeIdentity(message?.sender);
+  const me = normalizeIdentity(currentDisplayName());
+  return Boolean(sender && me && sender === me && sender !== 'system');
 }
 
 function closeReactionPickers(exceptMessageId = null) {
@@ -543,7 +553,7 @@ function createMessageNode(message) {
   article.className = 'message';
   article.dataset.messageId = String(message.id);
 
-  if (message.sender === state.displayName) article.classList.add('mine');
+  if (isMine(message)) article.classList.add('mine');
   if (message.sender === 'System') article.classList.add('system');
   if (message.deleted_at) article.classList.add('deleted');
   if (Number(message.id) === state.editingMessageId) article.classList.add('editing');

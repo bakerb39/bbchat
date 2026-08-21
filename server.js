@@ -43,8 +43,32 @@ async function initDatabase() {
     throw new Error('DATABASE_URL is required when running on Render.');
   }
 
+  let connectionString = databaseUrl;
+  let ssl;
+
+  // Render's external PostgreSQL URL requires TLS. Strip URL-level SSL
+  // options before passing an explicit pg SSL configuration so the
+  // connection-string parser cannot override it. Internal Render hostnames
+  // do not end in .render.com and continue to use the private connection.
+  try {
+    const parsedDatabaseUrl = new URL(databaseUrl);
+    const isExternalRenderDatabase = parsedDatabaseUrl.hostname.endsWith('.render.com');
+
+    if (isExternalRenderDatabase) {
+      parsedDatabaseUrl.searchParams.delete('sslmode');
+      parsedDatabaseUrl.searchParams.delete('sslcert');
+      parsedDatabaseUrl.searchParams.delete('sslkey');
+      parsedDatabaseUrl.searchParams.delete('sslrootcert');
+      connectionString = parsedDatabaseUrl.toString();
+      ssl = { rejectUnauthorized: false };
+    }
+  } catch (_error) {
+    // Let pg report a clear connection-string error below if the URL is invalid.
+  }
+
   pool = new Pool({
-    connectionString: databaseUrl,
+    connectionString,
+    ssl,
     max: 10,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 10000

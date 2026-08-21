@@ -90,30 +90,25 @@ async function deriveConversationKey(passphrase, conversationId) {
   }, material, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
 }
 
-async function getConversationKey(conversationId, { promptIfMissing = false } = {}) {
-  if (state.cryptoKeys.has(conversationId)) return state.cryptoKeys.get(conversationId);
-  let passphrase = state.cryptoPassphrases.get(Number(conversationId)) || sessionStorage.getItem(passphraseStorageKey(conversationId)) || '';
-  if (!passphrase && promptIfMissing) {
-    passphrase = window.prompt('Enter the shared encryption passphrase for this chat. Share it with the other participant outside BB Chat. It is kept only for this browser session.') || '';
-    if (passphrase && passphrase.length < 10) {
-      setStatus('Use an encryption passphrase of at least 10 characters.');
-      return null;
-    }
-    if (passphrase) {
-      state.cryptoPassphrases.set(Number(conversationId), passphrase);
-      sessionStorage.setItem(passphraseStorageKey(conversationId), passphrase);
-    }
-  }
+async function getConversationKey(conversationId) {
+  const id = Number(conversationId);
+  if (state.cryptoKeys.has(id)) return state.cryptoKeys.get(id);
+
+  const passphrase = state.cryptoPassphrases.get(id) || sessionStorage.getItem(passphraseStorageKey(id)) || '';
   if (!passphrase) return null;
-  state.cryptoPassphrases.set(Number(conversationId), passphrase);
-  const key = await deriveConversationKey(passphrase, conversationId);
-  state.cryptoKeys.set(conversationId, key);
+
+  state.cryptoPassphrases.set(id, passphrase);
+  const key = await deriveConversationKey(passphrase, id);
+  state.cryptoKeys.set(id, key);
   return key;
 }
 
 async function encryptEnvelope(conversationId, payload) {
-  const key = await getConversationKey(conversationId, { promptIfMissing: true });
-  if (!key) return null;
+  const key = await getConversationKey(conversationId);
+  if (!key) {
+    setStatus('🔒 Click Encryption once to unlock this chat before sending.');
+    return null;
+  }
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const plain = new TextEncoder().encode(JSON.stringify(payload));
   const cipher = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plain));
@@ -914,10 +909,11 @@ el.encryptionBtn.addEventListener('click', async () => {
   const passphrase = window.prompt('Enter the shared encryption passphrase for this chat (at least 10 characters). It is kept only for this browser session.') || '';
   if (!passphrase) return;
   if (passphrase.length < 10) return setStatus('Use an encryption passphrase of at least 10 characters.');
-  state.cryptoPassphrases.set(Number(state.activeConversationId), passphrase);
-  sessionStorage.setItem(passphraseStorageKey(state.activeConversationId), passphrase);
-  state.cryptoKeys.delete(Number(state.activeConversationId));
-  await getConversationKey(state.activeConversationId);
+  const conversationId = Number(state.activeConversationId);
+  state.cryptoPassphrases.set(conversationId, passphrase);
+  sessionStorage.setItem(passphraseStorageKey(conversationId), passphrase);
+  const key = await deriveConversationKey(passphrase, conversationId);
+  state.cryptoKeys.set(conversationId, key);
   await refreshMessages({ forceAll: true, scroll: false, silent: true });
   setStatus('🔒 End-to-end encryption unlocked for this session');
 });

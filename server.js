@@ -51,7 +51,7 @@ async function initDatabase() {
   });
 
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS conversations (
+    CREATE TABLE IF NOT EXISTS bbchat_conversations (
       id BIGSERIAL PRIMARY KEY,
       title VARCHAR(120) NOT NULL,
       created_by VARCHAR(80) NOT NULL,
@@ -60,9 +60,9 @@ async function initDatabase() {
   `);
 
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS messages (
+    CREATE TABLE IF NOT EXISTS bbchat_messages (
       id BIGSERIAL PRIMARY KEY,
-      conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      conversation_id BIGINT NOT NULL REFERENCES bbchat_conversations(id) ON DELETE CASCADE,
       sender VARCHAR(80) NOT NULL,
       body TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -70,20 +70,20 @@ async function initDatabase() {
   `);
 
   await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_messages_conversation_id_id
-    ON messages (conversation_id, id);
+    CREATE INDEX IF NOT EXISTS idx_bbchat_messages_conversation_id_id
+    ON bbchat_messages (conversation_id, id);
   `);
 
-  const countResult = await pool.query('SELECT COUNT(*)::int AS count FROM conversations');
+  const countResult = await pool.query('SELECT COUNT(*)::int AS count FROM bbchat_conversations');
   if (countResult.rows[0].count === 0) {
     const created = await pool.query(
-      `INSERT INTO conversations (title, created_by)
+      `INSERT INTO bbchat_conversations (title, created_by)
        VALUES ($1, $2)
        RETURNING id`,
       ['Welcome chat', 'System']
     );
     await pool.query(
-      `INSERT INTO messages (conversation_id, sender, body)
+      `INSERT INTO bbchat_messages (conversation_id, sender, body)
        VALUES ($1, $2, $3)`,
       [created.rows[0].id, 'System', 'Welcome. Start a conversation or send a message here.']
     );
@@ -147,13 +147,13 @@ app.get('/api/conversations', async (_req, res, next) => {
         COALESCE(MAX(m.created_at), c.created_at) AS last_message_at,
         COALESCE((
           SELECT LEFT(m2.body, 100)
-          FROM messages m2
+          FROM bbchat_messages m2
           WHERE m2.conversation_id = c.id
           ORDER BY m2.id DESC
           LIMIT 1
         ), '') AS last_message_preview
-      FROM conversations c
-      LEFT JOIN messages m ON m.conversation_id = c.id
+      FROM bbchat_conversations c
+      LEFT JOIN bbchat_messages m ON m.conversation_id = c.id
       GROUP BY c.id
       ORDER BY last_message_at DESC, c.id DESC
       LIMIT 100;
@@ -185,7 +185,7 @@ app.post('/api/conversations', async (req, res, next) => {
     }
 
     const result = await pool.query(
-      `INSERT INTO conversations (title, created_by)
+      `INSERT INTO bbchat_conversations (title, created_by)
        VALUES ($1, $2)
        RETURNING id, title, created_by, created_at`,
       [title, createdBy]
@@ -221,14 +221,14 @@ app.get('/api/conversations/:id/messages', async (req, res, next) => {
       return res.json(rows);
     }
 
-    const conversation = await pool.query('SELECT id FROM conversations WHERE id = $1', [conversationId]);
+    const conversation = await pool.query('SELECT id FROM bbchat_conversations WHERE id = $1', [conversationId]);
     if (!conversation.rowCount) {
       return res.status(404).json({ error: 'Conversation not found.' });
     }
 
     const result = await pool.query(
       `SELECT id, conversation_id, sender, body, created_at
-       FROM messages
+       FROM bbchat_messages
        WHERE conversation_id = $1 AND id > $2
        ORDER BY id ASC
        LIMIT 500`,
@@ -267,9 +267,9 @@ app.post('/api/conversations/:id/messages', async (req, res, next) => {
     }
 
     const result = await pool.query(
-      `INSERT INTO messages (conversation_id, sender, body)
+      `INSERT INTO bbchat_messages (conversation_id, sender, body)
        SELECT id, $2, $3
-       FROM conversations
+       FROM bbchat_conversations
        WHERE id = $1
        RETURNING id, conversation_id, sender, body, created_at`,
       [conversationId, sender, body]

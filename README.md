@@ -15,12 +15,15 @@ A small multi-user chat app designed for Render. It uses ordinary HTTP polling r
 - Remembers display name, selected conversation, and polling preference in the browser
 - Mobile-friendly layout
 - Local in-memory development fallback when `DATABASE_URL` is not set
+- Paste photos directly into the message box with Ctrl+V / Cmd+V
+- Optional Photo button for choosing an image file
+- PNG, JPEG, WebP, and GIF up to 5 MB
 
 ## Shared Render database safety
 
 This version is intentionally configured to **reuse an existing Render PostgreSQL database** instead of creating a second free-tier database.
 
-Its tables are uniquely prefixed so they stay separate from other applications using the same database:
+Its tables are uniquely prefixed so they stay separate from other applications using the same database. Photo bytes are stored only in `bbchat_messages`:
 
 ```text
 bbchat_conversations
@@ -51,14 +54,14 @@ DATABASE_URL=postgresql://...
 1. Put these files in the `bbchat` GitHub repository (with `render.yaml` at the repo root).
 2. In Render, choose **New > Blueprint** and connect `bakerb39/bbchat`.
 3. Render reads `render.yaml` and creates only the Node web service. It will **not** try to create another PostgreSQL database.
-4. Because `DATABASE_URL` is marked `sync: false`, provide the existing Render database's **Internal Database URL** when Render asks for the environment variable.
+4. Because `DATABASE_URL` is marked `sync: false`, provide your existing database URL. For the current setup, use the **External Database URL** because the chat service is connecting across Render's public database endpoint.
 5. Deploy the Blueprint.
 6. Open the generated `onrender.com` URL in two browsers or devices.
 7. Use different display names, enter the same conversation, and send messages.
 
 ### Finding the existing Render database URL
 
-In Render, open the existing PostgreSQL database, find its connection information, and copy the **Internal Database URL**. Use that value for the `quick-notes-chat` web service's `DATABASE_URL` environment variable.
+In Render, open the existing PostgreSQL database and copy its **External Database URL** for the current chat setup. The server explicitly enables TLS for external `*.render.com` PostgreSQL hosts.
 
 Do not commit the database URL to GitHub.
 
@@ -69,7 +72,7 @@ If you prefer not to use the Blueprint:
 - Create the Node Web Service from the GitHub repo.
 - Build command: `npm install`
 - Start command: `npm start`
-- Add `DATABASE_URL` to the web service using the existing database's internal connection string.
+- Add `DATABASE_URL` to the web service using the existing database's External Database URL for the current setup.
 - Health check path: `/api/health`
 
 The app creates its `bbchat_*` tables automatically on startup.

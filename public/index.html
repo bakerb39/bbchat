@@ -45,8 +45,20 @@
       </section>
 
       <div class="composer">
-        <label class="sr-only" for="messageInput">Message</label>
-        <textarea id="messageInput" rows="2" maxlength="4000" placeholder="Type a message…" disabled></textarea>
+        <div class="composer-input-wrap">
+          <label class="sr-only" for="messageInput">Message</label>
+          <textarea id="messageInput" rows="2" maxlength="4000" placeholder="Type a message or paste a photo…" disabled></textarea>
+          <div id="imagePreview" class="image-preview" hidden>
+            <img id="imagePreviewImg" alt="Photo ready to send">
+            <div class="image-preview-info">
+              <span id="imagePreviewName">Photo ready to send</span>
+              <button id="removeImageBtn" class="text-button image-remove-button" type="button">Remove</button>
+            </div>
+          </div>
+          <div class="composer-hint">Paste an image with Ctrl+V / Cmd+V, or choose Photo.</div>
+        </div>
+        <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+        <button id="photoBtn" class="secondary-button" type="button" disabled>Photo</button>
         <button id="sendBtn" class="primary-button" type="button" disabled>Send</button>
       </div>
     </main>

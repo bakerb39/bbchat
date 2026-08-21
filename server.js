@@ -7,9 +7,11 @@ const PORT = Number(process.env.PORT || 3000);
 const isRender = process.env.RENDER === 'true';
 const databaseUrl = process.env.DATABASE_URL;
 const useMemoryStore = !databaseUrl && !isRender;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const ALLOWED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 
 app.disable('x-powered-by');
-app.use(express.json({ limit: '32kb' }));
+app.use(express.json({ limit: '8mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 let pool = null;
@@ -30,6 +32,36 @@ function cleanString(value, maxLength) {
 function toPositiveInt(value, fallback = 0) {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function parseImageDataUrl(value) {
+  if (!value) return null;
+  if (typeof value !== 'string') throw new Error('Invalid image data.');
+
+  const match = value.match(/^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=\r\n]+)$/i);
+  if (!match) throw new Error('Only PNG, JPEG, WebP, or GIF images are supported.');
+
+  const mime = match[1].toLowerCase();
+  if (!ALLOWED_IMAGE_TYPES.has(mime)) throw new Error('Unsupported image type.');
+
+  const buffer = Buffer.from(match[2], 'base64');
+  if (!buffer.length) throw new Error('The image is empty.');
+  if (buffer.length > MAX_IMAGE_BYTES) throw new Error('Images must be 5 MB or smaller.');
+
+  return { mime, buffer };
+}
+
+function serializeMessage(row) {
+  return {
+    id: row.id,
+    conversation_id: row.conversation_id,
+    sender: row.sender,
+    body: row.body || '',
+    created_at: row.created_at,
+    image_data: row.image_data ? Buffer.from(row.image_data).toString('base64') : null,
+    image_mime: row.image_mime || null,
+    image_name: row.image_name || null
+  };
 }
 
 async function initDatabase() {
@@ -89,8 +121,19 @@ async function initDatabase() {
       conversation_id BIGINT NOT NULL REFERENCES bbchat_conversations(id) ON DELETE CASCADE,
       sender VARCHAR(80) NOT NULL,
       body TEXT NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      image_data BYTEA,
+      image_mime VARCHAR(80),
+      image_name VARCHAR(255)
     );
+  `);
+
+  // Existing installs get the photo columns without recreating the table.
+  await pool.query(`
+    ALTER TABLE bbchat_messages
+      ADD COLUMN IF NOT EXISTS image_data BYTEA,
+      ADD COLUMN IF NOT EXISTS image_mime VARCHAR(80),
+      ADD COLUMN IF NOT EXISTS image_name VARCHAR(255);
   `);
 
   await pool.query(`
@@ -139,7 +182,7 @@ function memoryConversationSummary(conversation) {
     ...conversation,
     last_message_id: latest ? latest.id : 0,
     last_message_at: latest ? latest.created_at : conversation.created_at,
-    last_message_preview: latest ? latest.body.slice(0, 100) : ''
+    last_message_preview: latest ? (latest.body ? latest.body.slice(0, 100) : latest.image_data ? '📷 Photo' : '') : ''
   };
 }
 
@@ -170,7 +213,11 @@ app.get('/api/conversations', async (_req, res, next) => {
         COALESCE(MAX(m.id), 0)::bigint AS last_message_id,
         COALESCE(MAX(m.created_at), c.created_at) AS last_message_at,
         COALESCE((
-          SELECT LEFT(m2.body, 100)
+          SELECT CASE
+            WHEN NULLIF(m2.body, '') IS NOT NULL THEN LEFT(m2.body, 100)
+            WHEN m2.image_data IS NOT NULL THEN '📷 Photo'
+            ELSE ''
+          END
           FROM bbchat_messages m2
           WHERE m2.conversation_id = c.id
           ORDER BY m2.id DESC
@@ -241,7 +288,8 @@ app.get('/api/conversations/:id/messages', async (req, res, next) => {
 
       const rows = memory.messages
         .filter(m => m.conversation_id === conversationId && m.id > after)
-        .slice(0, 500);
+        .slice(0, 500)
+        .map(serializeMessage);
       return res.json(rows);
     }
 
@@ -251,7 +299,7 @@ app.get('/api/conversations/:id/messages', async (req, res, next) => {
     }
 
     const result = await pool.query(
-      `SELECT id, conversation_id, sender, body, created_at
+      `SELECT id, conversation_id, sender, body, created_at, image_data, image_mime, image_name
        FROM bbchat_messages
        WHERE conversation_id = $1 AND id > $2
        ORDER BY id ASC
@@ -259,7 +307,7 @@ app.get('/api/conversations/:id/messages', async (req, res, next) => {
       [conversationId, after]
     );
 
-    res.json(result.rows);
+    res.json(result.rows.map(serializeMessage));
   } catch (error) {
     next(error);
   }
@@ -270,9 +318,17 @@ app.post('/api/conversations/:id/messages', async (req, res, next) => {
     const conversationId = toPositiveInt(req.params.id);
     const sender = cleanString(req.body.sender, 80);
     const body = cleanString(req.body.body, 4000);
+    const imageName = cleanString(req.body.imageName, 255);
+    let image = null;
 
-    if (!conversationId || !sender || !body) {
-      return res.status(400).json({ error: 'Conversation, sender, and message are required.' });
+    try {
+      image = parseImageDataUrl(req.body.imageData);
+    } catch (error) {
+      return res.status(400).json({ error: error.message });
+    }
+
+    if (!conversationId || !sender || (!body && !image)) {
+      return res.status(400).json({ error: 'Conversation, sender, and either a message or photo are required.' });
     }
 
     if (useMemoryStore) {
@@ -284,26 +340,29 @@ app.post('/api/conversations/:id/messages', async (req, res, next) => {
         conversation_id: conversationId,
         sender,
         body,
-        created_at: new Date().toISOString()
+        created_at: new Date().toISOString(),
+        image_data: image?.buffer || null,
+        image_mime: image?.mime || null,
+        image_name: imageName || null
       };
       memory.messages.push(row);
-      return res.status(201).json(row);
+      return res.status(201).json(serializeMessage(row));
     }
 
     const result = await pool.query(
-      `INSERT INTO bbchat_messages (conversation_id, sender, body)
-       SELECT id, $2, $3
+      `INSERT INTO bbchat_messages (conversation_id, sender, body, image_data, image_mime, image_name)
+       SELECT id, $2, $3, $4, $5, $6
        FROM bbchat_conversations
        WHERE id = $1
-       RETURNING id, conversation_id, sender, body, created_at`,
-      [conversationId, sender, body]
+       RETURNING id, conversation_id, sender, body, created_at, image_data, image_mime, image_name`,
+      [conversationId, sender, body, image?.buffer || null, image?.mime || null, imageName || null]
     );
 
     if (!result.rowCount) {
       return res.status(404).json({ error: 'Conversation not found.' });
     }
 
-    res.status(201).json(result.rows[0]);
+    res.status(201).json(serializeMessage(result.rows[0]));
   } catch (error) {
     next(error);
   }

@@ -1,5 +1,7 @@
 const POLL_INTERVAL_MS = 2000;
 const CONVERSATION_REFRESH_MS = 6000;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const ALLOWED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 
 function readSeenMap() {
   try {
@@ -19,7 +21,8 @@ const state = {
   seenConversationMessageIds: readSeenMap(),
   pollingTimer: null,
   conversationTimer: null,
-  fetchingMessages: false
+  fetchingMessages: false,
+  pendingImage: null
 };
 
 const el = {
@@ -29,6 +32,12 @@ const el = {
   messages: document.getElementById('messages'),
   messageInput: document.getElementById('messageInput'),
   sendBtn: document.getElementById('sendBtn'),
+  photoBtn: document.getElementById('photoBtn'),
+  imageInput: document.getElementById('imageInput'),
+  imagePreview: document.getElementById('imagePreview'),
+  imagePreviewImg: document.getElementById('imagePreviewImg'),
+  imagePreviewName: document.getElementById('imagePreviewName'),
+  removeImageBtn: document.getElementById('removeImageBtn'),
   pollingToggle: document.getElementById('pollingToggle'),
   refreshBtn: document.getElementById('refreshBtn'),
   displayNameLabel: document.getElementById('displayNameLabel'),
@@ -56,6 +65,46 @@ function formatTime(iso) {
     hour: 'numeric',
     minute: '2-digit'
   }).format(new Date(iso));
+}
+
+function clearPendingImage() {
+  state.pendingImage = null;
+  el.imagePreview.hidden = true;
+  el.imagePreviewImg.removeAttribute('src');
+  el.imagePreviewName.textContent = 'Photo ready to send';
+  el.imageInput.value = '';
+}
+
+function showPendingImage(file, dataUrl) {
+  state.pendingImage = {
+    dataUrl,
+    name: file.name || 'Pasted photo',
+    type: file.type,
+    size: file.size
+  };
+  el.imagePreviewImg.src = dataUrl;
+  el.imagePreviewName.textContent = `${state.pendingImage.name} · ${Math.max(1, Math.round(file.size / 1024))} KB`;
+  el.imagePreview.hidden = false;
+}
+
+function attachImageFile(file) {
+  if (!file) return;
+  if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
+    setStatus('Use a PNG, JPEG, WebP, or GIF image.');
+    return;
+  }
+  if (file.size > MAX_IMAGE_BYTES) {
+    setStatus('Images must be 5 MB or smaller.');
+    return;
+  }
+
+  const reader = new FileReader();
+  reader.addEventListener('load', () => {
+    showPendingImage(file, reader.result);
+    setStatus('Photo attached · press Send');
+  });
+  reader.addEventListener('error', () => setStatus('Could not read that image.'));
+  reader.readAsDataURL(file);
 }
 
 async function api(url, options = {}) {
@@ -140,7 +189,9 @@ async function selectConversation(id) {
   const conversation = state.conversations.find(item => Number(item.id) === id);
   el.conversationTitle.textContent = conversation?.title || `Conversation ${id}`;
   el.messageInput.disabled = false;
+  el.photoBtn.disabled = false;
   el.sendBtn.disabled = false;
+  clearPendingImage();
   renderConversations();
 
   await refreshMessages({ forceAll: true, scroll: true });
@@ -166,11 +217,34 @@ function createMessageNode(message) {
 
   meta.append(sender, time);
 
-  const body = document.createElement('div');
-  body.className = 'message-body';
-  body.textContent = message.body;
+  const content = document.createElement('div');
+  content.className = 'message-content';
 
-  article.append(meta, body);
+  if (message.body) {
+    const body = document.createElement('div');
+    body.className = 'message-body';
+    body.textContent = message.body;
+    content.appendChild(body);
+  }
+
+  if (message.image_data && message.image_mime) {
+    const imageLink = document.createElement('a');
+    imageLink.className = 'message-image-link';
+    imageLink.href = `data:${message.image_mime};base64,${message.image_data}`;
+    imageLink.target = '_blank';
+    imageLink.rel = 'noopener';
+    imageLink.title = 'Open photo';
+
+    const image = document.createElement('img');
+    image.className = 'message-image';
+    image.src = imageLink.href;
+    image.alt = message.image_name || 'Shared photo';
+    image.loading = 'lazy';
+    imageLink.appendChild(image);
+    content.appendChild(imageLink);
+  }
+
+  article.append(meta, content);
   return article;
 }
 
@@ -228,7 +302,8 @@ async function refreshMessages({ forceAll = false, scroll = false, silent = fals
 
 async function sendMessage() {
   const body = el.messageInput.value.trim();
-  if (!body || !state.activeConversationId) return;
+  const image = state.pendingImage;
+  if ((!body && !image) || !state.activeConversationId) return;
 
   el.sendBtn.disabled = true;
   setStatus('Sending…');
@@ -236,7 +311,12 @@ async function sendMessage() {
   try {
     const message = await api(`/api/conversations/${state.activeConversationId}/messages`, {
       method: 'POST',
-      body: JSON.stringify({ sender: state.displayName, body })
+      body: JSON.stringify({
+        sender: state.displayName,
+        body,
+        imageData: image?.dataUrl || null,
+        imageName: image?.name || null
+      })
     });
 
     const empty = el.messages.querySelector('.empty-state');
@@ -244,6 +324,7 @@ async function sendMessage() {
 
     appendMessages([message], { scroll: true });
     el.messageInput.value = '';
+    clearPendingImage();
     await loadConversations({ preserveStatus: true });
     setStatus(state.pollingEnabled ? 'Sent · auto-refresh on' : 'Sent · auto-refresh off');
     el.messageInput.focus();
@@ -327,6 +408,21 @@ el.newConversationBtn.addEventListener('click', showConversationDialog);
 el.changeNameBtn.addEventListener('click', showNameDialog);
 el.refreshBtn.addEventListener('click', () => refreshMessages({ scroll: false }));
 el.sendBtn.addEventListener('click', sendMessage);
+el.photoBtn.addEventListener('click', () => el.imageInput.click());
+el.removeImageBtn.addEventListener('click', clearPendingImage);
+el.imageInput.addEventListener('change', () => attachImageFile(el.imageInput.files?.[0]));
+
+el.messageInput.addEventListener('paste', event => {
+  const imageItem = Array.from(event.clipboardData?.items || []).find(
+    item => item.kind === 'file' && item.type.startsWith('image/')
+  );
+  if (!imageItem) return;
+
+  const file = imageItem.getAsFile();
+  if (!file) return;
+  event.preventDefault();
+  attachImageFile(file);
+});
 
 el.messageInput.addEventListener('keydown', event => {
   if (event.key === 'Enter' && !event.shiftKey) {

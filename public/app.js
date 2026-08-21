@@ -123,6 +123,39 @@ async function getConversationKey(conversationId) {
   return key;
 }
 
+
+async function validateConversationKey(conversationId, key) {
+  const id = Number(conversationId);
+  const encryptedMessage = [...state.messagesById.values()].find(message =>
+    Number(message.conversation_id) === id &&
+    !message.deleted_at &&
+    (message._encryptedData || (message.image_mime === E2EE_MIME && message.image_data))
+  );
+
+  // A brand-new encrypted conversation has nothing to validate against yet.
+  if (!encryptedMessage) return true;
+
+  try {
+    const encoded = encryptedMessage._encryptedData || encryptedMessage.image_data;
+    const packed = base64ToBytes(encoded);
+    const iv = packed.slice(0, 12);
+    const cipher = packed.slice(12);
+    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, cipher);
+    JSON.parse(new TextDecoder().decode(plain));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function clearConversationEncryptionKey(conversationId) {
+  const id = Number(conversationId);
+  if (!id) return;
+  state.cryptoKeys.delete(id);
+  state.cryptoPassphrases.delete(id);
+  sessionStorage.removeItem(passphraseStorageKey(id));
+}
+
 async function encryptEnvelope(conversationId, payload) {
   const key = await getConversationKey(conversationId);
   if (!key) {
@@ -347,7 +380,59 @@ async function selectConversation(id) {
 }
 
 function normalizeIdentity(value) {
-  return String(value || '').normalize('NFKC').trim().toLocaleLowerCase();
+  return String(value || '')
+    .normalize('NFKC')
+    .trim()
+    .toLocaleLowerCase()
+    .replace(/\s+/g, ' ');
+}
+
+function identityParts(value) {
+  return normalizeIdentity(value)
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+function readIdentityAliases() {
+  try {
+    const aliases = JSON.parse(localStorage.getItem('qnc.identityAliases') || '[]');
+    return Array.isArray(aliases) ? aliases.filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberIdentityAlias(value) {
+  const alias = String(value || '').trim().slice(0, 80);
+  if (!alias || normalizeIdentity(alias) === 'system') return;
+  const aliases = readIdentityAliases();
+  if (!aliases.some(item => normalizeIdentity(item) === normalizeIdentity(alias))) {
+    aliases.push(alias);
+    localStorage.setItem('qnc.identityAliases', JSON.stringify(aliases.slice(-10)));
+  }
+}
+
+function sameLegacyIdentity(a, b) {
+  const left = normalizeIdentity(a);
+  const right = normalizeIdentity(b);
+  if (!left || !right || left === 'system' || right === 'system') return false;
+  if (left === right) return true;
+
+  // Treat punctuation-only differences as the same identity.
+  const compactLeft = left.replace(/[^\p{L}\p{N}]+/gu, '');
+  const compactRight = right.replace(/[^\p{L}\p{N}]+/gu, '');
+  if (compactLeft && compactLeft === compactRight) return true;
+
+  // Legacy BB Chat commonly stored a short display name on earlier sessions.
+  // Match "Brian", "Brian B", and "Brian Baker" conservatively by first name
+  // plus a compatible last initial when both sides have one.
+  const lp = identityParts(left);
+  const rp = identityParts(right);
+  if (!lp.length || !rp.length || lp[0] !== rp[0]) return false;
+  if (lp.length === 1 || rp.length === 1) return true;
+  return lp[1][0] === rp[1][0];
 }
 
 function currentDisplayName() {
@@ -355,9 +440,10 @@ function currentDisplayName() {
 }
 
 function isMine(message) {
-  const sender = normalizeIdentity(message?.sender);
-  const me = normalizeIdentity(currentDisplayName());
-  return Boolean(sender && me && sender === me && sender !== 'system');
+  const sender = message?.sender;
+  const me = currentDisplayName();
+  if (sameLegacyIdentity(sender, me)) return true;
+  return readIdentityAliases().some(alias => sameLegacyIdentity(sender, alias));
 }
 
 function closeReactionPickers(exceptMessageId = null) {
@@ -920,6 +1006,10 @@ el.nameForm.addEventListener('submit', event => {
   event.preventDefault();
   const name = el.nameInput.value.trim().slice(0, 80);
   if (!name) return;
+  const previousName = currentDisplayName();
+  if (previousName && normalizeIdentity(previousName) !== normalizeIdentity(name)) {
+    rememberIdentityAlias(previousName);
+  }
   state.displayName = name;
   localStorage.setItem('qnc.displayName', name);
   el.displayNameLabel.textContent = name;
@@ -953,7 +1043,7 @@ el.changeNameBtn.addEventListener('click', showNameDialog);
 function updateEncryptionButton() {
   const id = Number(state.activeConversationId);
   const enabled = isEncryptionEnabled(id);
-  el.encryptionBtn.textContent = enabled ? '🔒 Encrypted · v1.7.0' : '🔓 Encryption Off · v1.7.0';
+  el.encryptionBtn.textContent = enabled ? '🔒 Encrypted · v1.7.3' : '🔓 Encryption Off · v1.7.3';
   el.encryptionBtn.title = enabled ? 'Click to turn encryption off' : 'Click to turn encryption on';
 }
 
@@ -963,19 +1053,15 @@ el.encryptionBtn.addEventListener('click', async () => {
 
   if (isEncryptionEnabled(conversationId)) {
     setEncryptionEnabled(conversationId, false);
+    clearConversationEncryptionKey(conversationId);
     updateEncryptionButton();
-    setStatus('Encryption off · new messages will send normally');
+    setStatus('Encryption off · saved session key cleared');
     return;
   }
 
-  const existingKey = await getConversationKey(conversationId);
-  if (existingKey) {
-    setEncryptionEnabled(conversationId, true);
-    updateEncryptionButton();
-    setStatus('🔒 Encryption on for new messages');
-    return;
-  }
-
+  // Always ask when enabling. This prevents a previously mistyped cached phrase
+  // from silently re-enabling encryption.
+  clearConversationEncryptionKey(conversationId);
   el.encryptionInput.value = '';
   el.encryptionDialog.showModal();
   setTimeout(() => el.encryptionInput.focus(), 0);
@@ -992,6 +1078,18 @@ el.encryptionForm.addEventListener('submit', async event => {
 
   try {
     const key = await deriveConversationKey(passphrase, conversationId);
+    const valid = await validateConversationKey(conversationId, key);
+
+    if (!valid) {
+      clearConversationEncryptionKey(conversationId);
+      setEncryptionEnabled(conversationId, false);
+      updateEncryptionButton();
+      setStatus('Incorrect encryption phrase · try again');
+      el.encryptionInput.focus();
+      el.encryptionInput.select();
+      return;
+    }
+
     state.cryptoPassphrases.set(conversationId, passphrase);
     state.cryptoKeys.set(conversationId, key);
     sessionStorage.setItem(passphraseStorageKey(conversationId), passphrase);
@@ -999,8 +1097,11 @@ el.encryptionForm.addEventListener('submit', async event => {
     el.encryptionDialog.close();
     updateEncryptionButton();
     await refreshMessages({ forceAll: true, scroll: false, silent: true });
-    setStatus('🔒 Encryption on · passphrase remembered for this browser session');
+    setStatus('🔒 Encryption on · passphrase verified for this browser session');
   } catch (error) {
+    clearConversationEncryptionKey(conversationId);
+    setEncryptionEnabled(conversationId, false);
+    updateEncryptionButton();
     setStatus(`Encryption could not be enabled: ${error.message}`);
   }
 });

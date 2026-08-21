@@ -40,6 +40,7 @@ const el = {
   removeImageBtn: document.getElementById('removeImageBtn'),
   pollingToggle: document.getElementById('pollingToggle'),
   refreshBtn: document.getElementById('refreshBtn'),
+  deleteConversationBtn: document.getElementById('deleteConversationBtn'),
   displayNameLabel: document.getElementById('displayNameLabel'),
   changeNameBtn: document.getElementById('changeNameBtn'),
   newConversationBtn: document.getElementById('newConversationBtn'),
@@ -164,11 +165,29 @@ async function loadConversations({ preserveStatus = false } = {}) {
     state.conversations = rows;
     renderConversations();
 
-    if (!state.activeConversationId && rows.length) {
+    if (!rows.length) {
+      state.activeConversationId = null;
+      localStorage.removeItem('qnc.activeConversationId');
+      state.lastMessageId = 0;
+      state.renderedMessageIds.clear();
+      clearPendingImage();
+      el.conversationTitle.textContent = 'No conversations';
+      el.messages.innerHTML = '<div class="empty-state">Create a conversation to begin.</div>';
+      el.messageInput.disabled = true;
+      el.photoBtn.disabled = true;
+      el.sendBtn.disabled = true;
+      el.deleteConversationBtn.disabled = true;
+    } else if (!state.activeConversationId) {
       await selectConversation(Number(rows[0].id));
-    } else if (state.activeConversationId) {
+    } else {
       const stillExists = rows.some(row => Number(row.id) === state.activeConversationId);
-      if (!stillExists && rows.length) await selectConversation(Number(rows[0].id));
+      if (!stillExists) {
+        await selectConversation(Number(rows[0].id));
+      } else if (el.messageInput.disabled) {
+        // A remembered conversation ID survives reloads/deploys. Re-select it so
+        // the composer is enabled and its messages are loaded.
+        await selectConversation(state.activeConversationId);
+      }
     }
 
     if (!preserveStatus) setStatus(state.pollingEnabled ? 'Auto-refresh on · every 2 seconds' : 'Auto-refresh off');
@@ -191,6 +210,7 @@ async function selectConversation(id) {
   el.messageInput.disabled = false;
   el.photoBtn.disabled = false;
   el.sendBtn.disabled = false;
+  el.deleteConversationBtn.disabled = false;
   clearPendingImage();
   renderConversations();
 
@@ -335,6 +355,39 @@ async function sendMessage() {
   }
 }
 
+async function deleteConversation() {
+  if (!state.activeConversationId) return;
+
+  const conversation = state.conversations.find(
+    item => Number(item.id) === state.activeConversationId
+  );
+  const title = conversation?.title || 'this chat';
+
+  if (!window.confirm(`Delete "${title}" and all of its messages? This cannot be undone.`)) return;
+
+  el.deleteConversationBtn.disabled = true;
+  setStatus('Deleting chat…');
+
+  try {
+    const deletedId = state.activeConversationId;
+    await api(`/api/conversations/${deletedId}`, { method: 'DELETE' });
+
+    delete state.seenConversationMessageIds[deletedId];
+    saveSeenMap();
+    state.activeConversationId = null;
+    localStorage.removeItem('qnc.activeConversationId');
+    state.lastMessageId = 0;
+    state.renderedMessageIds.clear();
+    clearPendingImage();
+
+    await loadConversations({ preserveStatus: true });
+    setStatus('Chat deleted');
+  } catch (error) {
+    el.deleteConversationBtn.disabled = false;
+    setStatus(error.message);
+  }
+}
+
 function restartPolling() {
   clearInterval(state.pollingTimer);
   state.pollingTimer = null;
@@ -407,6 +460,7 @@ el.cancelConversationBtn.addEventListener('click', () => el.conversationDialog.c
 el.newConversationBtn.addEventListener('click', showConversationDialog);
 el.changeNameBtn.addEventListener('click', showNameDialog);
 el.refreshBtn.addEventListener('click', () => refreshMessages({ scroll: false }));
+el.deleteConversationBtn.addEventListener('click', deleteConversation);
 el.sendBtn.addEventListener('click', sendMessage);
 el.photoBtn.addEventListener('click', () => el.imageInput.click());
 el.removeImageBtn.addEventListener('click', clearPendingImage);

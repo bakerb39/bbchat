@@ -173,7 +173,7 @@ button { cursor: pointer; }
 
 .toggle-label input { accent-color: var(--navy); }
 
-.primary-button, .secondary-button {
+.primary-button, .secondary-button, .danger-button {
   border-radius: 7px;
   padding: 8px 13px;
   border: 1px solid var(--navy);
@@ -191,6 +191,16 @@ button { cursor: pointer; }
   color: var(--navy);
 }
 .secondary-button:hover { background: var(--blue-soft); }
+
+.danger-button {
+  border-radius: 7px;
+  padding: 8px 13px;
+  border: 1px solid #a33b3b;
+  background: white;
+  color: #8b2f2f;
+}
+.danger-button:hover { background: #fff2f2; }
+.danger-button:disabled { opacity: .45; cursor: default; }
 
 .messages {
   overflow-y: auto;

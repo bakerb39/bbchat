@@ -273,6 +273,39 @@ app.post('/api/conversations', async (req, res, next) => {
   }
 });
 
+
+app.delete('/api/conversations/:id', async (req, res, next) => {
+  try {
+    const conversationId = toPositiveInt(req.params.id);
+
+    if (!conversationId) {
+      return res.status(400).json({ error: 'Invalid conversation ID.' });
+    }
+
+    if (useMemoryStore) {
+      const index = memory.conversations.findIndex(c => c.id === conversationId);
+      if (index === -1) return res.status(404).json({ error: 'Conversation not found.' });
+
+      memory.conversations.splice(index, 1);
+      memory.messages = memory.messages.filter(m => m.conversation_id !== conversationId);
+      return res.json({ ok: true, id: conversationId });
+    }
+
+    const result = await pool.query(
+      'DELETE FROM bbchat_conversations WHERE id = $1 RETURNING id',
+      [conversationId]
+    );
+
+    if (!result.rowCount) {
+      return res.status(404).json({ error: 'Conversation not found.' });
+    }
+
+    res.json({ ok: true, id: result.rows[0].id });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get('/api/conversations/:id/messages', async (req, res, next) => {
   try {
     const conversationId = toPositiveInt(req.params.id);

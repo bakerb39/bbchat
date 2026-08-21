@@ -14,6 +14,7 @@ A small multi-user chat app designed for Render. It uses ordinary HTTP polling r
 - Basic unread indicators in the conversation list
 - Remembers display name, selected conversation, and polling preference in the browser
 - Mobile-friendly layout
+- Delete conversations (including their messages/photos) with confirmation
 - Local in-memory development fallback when `DATABASE_URL` is not set
 - Paste photos directly into the message box with Ctrl+V / Cmd+V
 - Optional Photo button for choosing an image file
@@ -76,6 +77,10 @@ If you prefer not to use the Blueprint:
 - Health check path: `/api/health`
 
 The app creates its `bbchat_*` tables automatically on startup.
+
+## Reload/composer fix
+
+This version re-selects a remembered conversation after a page reload or redeploy, so the message box and Photo button are enabled immediately instead of remaining disabled.
 
 ## Polling behavior
 

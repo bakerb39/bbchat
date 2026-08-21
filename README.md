@@ -1,4 +1,4 @@
-# Quick Notes Chat
+# BB Chat
 
 A small multi-user chat app designed for Render. It uses ordinary HTTP polling rather than WebSockets.
 
@@ -20,6 +20,18 @@ A small multi-user chat app designed for Render. It uses ordinary HTTP polling r
 - Optional Photo button for choosing an image file
 - PNG, JPEG, WebP, and GIF up to 5 MB
 
+## Version 1.4 message actions
+
+- App display name changed to **BB Chat**.
+- Hover a message to reveal a compact Teams-style action bar.
+- Any user can add or remove one of six reactions: 👍 ❤️ 😂 😮 😢 🎉.
+- A user can edit or delete messages whose sender name matches their current display name.
+- Edited messages show an `(edited)` indicator.
+- Deleted messages become a small `This message was deleted.` tombstone and their stored photo/reactions are cleared.
+- Polling now also retrieves changes to older messages, so edits, deletions, and reactions appear on other computers without a page refresh.
+
+This initial app still uses display names rather than authenticated accounts, so message ownership is intentionally lightweight.
+
 ## Shared Render database safety
 
 This version is intentionally configured to **reuse an existing Render PostgreSQL database** instead of creating a second free-tier database.
@@ -36,7 +48,7 @@ The app creates only those tables and its own `idx_bbchat_messages_conversation_
 
 ## Cache refresh behavior
 
-Version 1.3 adds frontend cache busting. The HTML shell is sent with no-cache headers and references versioned JavaScript/CSS URLs (`?v=1.3.0`). After a Render deploy, opening or refreshing the app on another computer should load the newly deployed frontend automatically rather than continuing to use an older cached client.
+Version 1.3 added frontend cache busting. The HTML shell is sent with no-cache headers and references versioned JavaScript/CSS URLs (`?v=1.4.0`). After a Render deploy, opening or refreshing the app on another computer should load the newly deployed frontend automatically rather than continuing to use an older cached client.
 
 ## Local run
 
@@ -104,16 +116,18 @@ While Auto-refresh is ON, the conversation sidebar refreshes every 6 seconds so 
 - `GET /api/health`
 - `GET /api/conversations`
 - `POST /api/conversations`
-- `GET /api/conversations/:id/messages?after=123`
+- `GET /api/conversations/:id/messages?after=123&changedAfter=<timestamp>`
 - `POST /api/conversations/:id/messages`
+- `PATCH /api/conversations/:conversationId/messages/:messageId`
+- `DELETE /api/conversations/:conversationId/messages/:messageId`
+- `POST /api/conversations/:conversationId/messages/:messageId/reactions`
 
 ## Good next additions
 
 - Clerk authentication
 - Invite-only conversations
-- Edit/delete messages
 - Presence ("Brian is viewing")
-- Attachments
+- Non-image file attachments
 - Search
 - Connect a Mark, Set, Go Random Note to a conversation
 - Replace polling with WebSockets later if usage grows

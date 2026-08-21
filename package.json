@@ -1,8 +1,8 @@
 {
-  "name": "quick-notes-chat",
-  "version": "1.1.0",
+  "name": "bb-chat",
+  "version": "1.4.0",
   "private": true,
-  "description": "A small polling-based multi-user chat app for Render.",
+  "description": "BB Chat: a small polling-based multi-user chat app for Render.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

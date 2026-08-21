@@ -2,6 +2,7 @@ const POLL_INTERVAL_MS = 2000;
 const CONVERSATION_REFRESH_MS = 6000;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const ALLOWED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+const REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🎉'];
 
 function readSeenMap() {
   try {
@@ -16,13 +17,16 @@ const state = {
   pollingEnabled: localStorage.getItem('qnc.pollingEnabled') !== 'false',
   activeConversationId: Number(localStorage.getItem('qnc.activeConversationId')) || null,
   lastMessageId: 0,
+  lastSyncAt: null,
   renderedMessageIds: new Set(),
+  messagesById: new Map(),
   conversations: [],
   seenConversationMessageIds: readSeenMap(),
   pollingTimer: null,
   conversationTimer: null,
   fetchingMessages: false,
-  pendingImage: null
+  pendingImage: null,
+  editingMessageId: null
 };
 
 const el = {
@@ -124,6 +128,24 @@ async function api(url, options = {}) {
   return data;
 }
 
+async function fetchMessageUpdates(conversationId, after, changedAfter) {
+  const params = new URLSearchParams({ after: String(after) });
+  if (changedAfter) params.set('changedAfter', changedAfter);
+
+  const response = await fetch(`/api/conversations/${conversationId}/messages?${params.toString()}`);
+  const contentType = response.headers.get('content-type') || '';
+  const data = contentType.includes('application/json') ? await response.json() : null;
+
+  if (!response.ok) {
+    throw new Error(data?.error || `Request failed (${response.status})`);
+  }
+
+  return {
+    messages: Array.isArray(data) ? data : [],
+    syncTime: response.headers.get('X-BBChat-Sync-Time') || new Date().toISOString()
+  };
+}
+
 function renderConversations() {
   el.conversationList.textContent = '';
 
@@ -169,7 +191,10 @@ async function loadConversations({ preserveStatus = false } = {}) {
       state.activeConversationId = null;
       localStorage.removeItem('qnc.activeConversationId');
       state.lastMessageId = 0;
+      state.lastSyncAt = null;
       state.renderedMessageIds.clear();
+      state.messagesById.clear();
+      state.editingMessageId = null;
       clearPendingImage();
       el.conversationTitle.textContent = 'No conversations';
       el.messages.innerHTML = '<div class="empty-state">Create a conversation to begin.</div>';
@@ -184,25 +209,28 @@ async function loadConversations({ preserveStatus = false } = {}) {
       if (!stillExists) {
         await selectConversation(Number(rows[0].id));
       } else if (el.messageInput.disabled) {
-        // A remembered conversation ID survives reloads/deploys. Re-select it so
-        // the composer is enabled and its messages are loaded.
         await selectConversation(state.activeConversationId);
       }
     }
 
-    if (!preserveStatus) setStatus(state.pollingEnabled ? 'Auto-refresh on · every 2 seconds' : 'Auto-refresh off');
+    if (!preserveStatus) {
+      setStatus(state.pollingEnabled ? 'Auto-refresh on · every 2 seconds' : 'Auto-refresh off');
+    }
   } catch (error) {
     setStatus(error.message);
   }
 }
 
 async function selectConversation(id) {
-  if (!id || id === state.activeConversationId && state.renderedMessageIds.size) return;
+  if (!id || (id === state.activeConversationId && state.renderedMessageIds.size)) return;
 
   state.activeConversationId = id;
   localStorage.setItem('qnc.activeConversationId', String(id));
   state.lastMessageId = 0;
+  state.lastSyncAt = null;
   state.renderedMessageIds.clear();
+  state.messagesById.clear();
+  state.editingMessageId = null;
   el.messages.textContent = '';
 
   const conversation = state.conversations.find(item => Number(item.id) === id);
@@ -217,12 +245,207 @@ async function selectConversation(id) {
   await refreshMessages({ forceAll: true, scroll: true });
 }
 
+function isMine(message) {
+  return message.sender === state.displayName && message.sender !== 'System';
+}
+
+function closeReactionPickers(exceptMessageId = null) {
+  for (const picker of document.querySelectorAll('.reaction-picker:not([hidden])')) {
+    if (exceptMessageId && Number(picker.dataset.messageId) === Number(exceptMessageId)) continue;
+    picker.hidden = true;
+  }
+}
+
+function createReactionStrip(message) {
+  const reactions = message.reactions && typeof message.reactions === 'object' ? message.reactions : {};
+  const entries = REACTIONS
+    .map(emoji => [emoji, Array.isArray(reactions[emoji]) ? reactions[emoji] : []])
+    .filter(([, users]) => users.length);
+
+  if (!entries.length) return null;
+
+  const strip = document.createElement('div');
+  strip.className = 'reaction-strip';
+
+  for (const [emoji, users] of entries) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'reaction-pill';
+    if (users.includes(state.displayName)) button.classList.add('mine-reaction');
+    button.title = users.join(', ');
+    button.setAttribute('aria-label', `${emoji} reaction from ${users.length} ${users.length === 1 ? 'person' : 'people'}`);
+
+    const icon = document.createElement('span');
+    icon.textContent = emoji;
+    const count = document.createElement('span');
+    count.textContent = String(users.length);
+    button.append(icon, count);
+
+    button.addEventListener('click', event => {
+      event.stopPropagation();
+      toggleReaction(Number(message.id), emoji);
+    });
+    strip.appendChild(button);
+  }
+
+  return strip;
+}
+
+function createMessageImage(message) {
+  if (!message.image_data || !message.image_mime) return null;
+
+  const imageLink = document.createElement('a');
+  imageLink.className = 'message-image-link';
+  imageLink.href = `data:${message.image_mime};base64,${message.image_data}`;
+  imageLink.target = '_blank';
+  imageLink.rel = 'noopener';
+  imageLink.title = 'Open photo';
+
+  const image = document.createElement('img');
+  image.className = 'message-image';
+  image.src = imageLink.href;
+  image.alt = message.image_name || 'Shared photo';
+  image.loading = 'lazy';
+  imageLink.appendChild(image);
+  return imageLink;
+}
+
+function createMessageActions(message) {
+  if (message.deleted_at || message.sender === 'System') return null;
+
+  const actions = document.createElement('div');
+  actions.className = 'message-actions';
+
+  const reactionControl = document.createElement('div');
+  reactionControl.className = 'reaction-control';
+
+  const reactButton = document.createElement('button');
+  reactButton.type = 'button';
+  reactButton.className = 'message-action-button';
+  reactButton.textContent = '☺';
+  reactButton.title = 'React';
+  reactButton.setAttribute('aria-label', 'React to message');
+
+  const picker = document.createElement('div');
+  picker.className = 'reaction-picker';
+  picker.dataset.messageId = String(message.id);
+  picker.hidden = true;
+
+  for (const emoji of REACTIONS) {
+    const emojiButton = document.createElement('button');
+    emojiButton.type = 'button';
+    emojiButton.className = 'reaction-option';
+    emojiButton.textContent = emoji;
+    emojiButton.title = `React ${emoji}`;
+    emojiButton.setAttribute('aria-label', `React ${emoji}`);
+    emojiButton.addEventListener('click', event => {
+      event.stopPropagation();
+      picker.hidden = true;
+      toggleReaction(Number(message.id), emoji);
+    });
+    picker.appendChild(emojiButton);
+  }
+
+  reactButton.addEventListener('click', event => {
+    event.stopPropagation();
+    const willOpen = picker.hidden;
+    closeReactionPickers(Number(message.id));
+    picker.hidden = !willOpen;
+  });
+
+  reactionControl.append(reactButton, picker);
+  actions.appendChild(reactionControl);
+
+  if (isMine(message)) {
+    const editButton = document.createElement('button');
+    editButton.type = 'button';
+    editButton.className = 'message-action-button';
+    editButton.textContent = 'Edit';
+    editButton.title = 'Edit message';
+    editButton.addEventListener('click', event => {
+      event.stopPropagation();
+      beginEditMessage(Number(message.id));
+    });
+
+    const deleteButton = document.createElement('button');
+    deleteButton.type = 'button';
+    deleteButton.className = 'message-action-button danger-text';
+    deleteButton.textContent = 'Delete';
+    deleteButton.title = 'Delete message';
+    deleteButton.addEventListener('click', event => {
+      event.stopPropagation();
+      deleteMessage(Number(message.id));
+    });
+
+    actions.append(editButton, deleteButton);
+  }
+
+  return actions;
+}
+
+function createEditContent(message) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'message-edit-wrap';
+
+  const textarea = document.createElement('textarea');
+  textarea.className = 'message-edit-input';
+  textarea.rows = 3;
+  textarea.maxLength = 4000;
+  textarea.value = message.body || '';
+  textarea.setAttribute('aria-label', 'Edit message');
+
+  const controls = document.createElement('div');
+  controls.className = 'message-edit-actions';
+
+  const cancelButton = document.createElement('button');
+  cancelButton.type = 'button';
+  cancelButton.className = 'secondary-button compact-button';
+  cancelButton.textContent = 'Cancel';
+
+  const saveButton = document.createElement('button');
+  saveButton.type = 'button';
+  saveButton.className = 'primary-button compact-button';
+  saveButton.textContent = 'Save';
+
+  cancelButton.addEventListener('click', () => cancelEditMessage(Number(message.id)));
+  saveButton.addEventListener('click', () => saveEditMessage(Number(message.id), textarea.value));
+  textarea.addEventListener('keydown', event => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      cancelEditMessage(Number(message.id));
+    } else if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      saveEditMessage(Number(message.id), textarea.value);
+    }
+  });
+
+  controls.append(cancelButton, saveButton);
+  wrapper.append(textarea, controls);
+
+  if (message.image_data) {
+    const note = document.createElement('div');
+    note.className = 'edit-photo-note';
+    note.textContent = 'The attached photo will be kept.';
+    wrapper.appendChild(note);
+  }
+
+  setTimeout(() => {
+    textarea.focus();
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+  }, 0);
+
+  return wrapper;
+}
+
 function createMessageNode(message) {
   const article = document.createElement('article');
   article.className = 'message';
+  article.dataset.messageId = String(message.id);
 
   if (message.sender === state.displayName) article.classList.add('mine');
   if (message.sender === 'System') article.classList.add('system');
+  if (message.deleted_at) article.classList.add('deleted');
+  if (Number(message.id) === state.editingMessageId) article.classList.add('editing');
 
   const meta = document.createElement('div');
   meta.className = 'message-meta';
@@ -237,48 +460,80 @@ function createMessageNode(message) {
 
   meta.append(sender, time);
 
+  if (message.edited_at && !message.deleted_at) {
+    const edited = document.createElement('span');
+    edited.className = 'edited-label';
+    edited.textContent = '(edited)';
+    meta.appendChild(edited);
+  }
+
+  const actions = createMessageActions(message);
+  if (actions) article.appendChild(actions);
+  article.appendChild(meta);
+
   const content = document.createElement('div');
   content.className = 'message-content';
 
-  if (message.body) {
-    const body = document.createElement('div');
-    body.className = 'message-body';
-    body.textContent = message.body;
-    content.appendChild(body);
+  if (message.deleted_at) {
+    const deleted = document.createElement('div');
+    deleted.className = 'message-body deleted-message-body';
+    deleted.textContent = 'This message was deleted.';
+    content.appendChild(deleted);
+  } else if (Number(message.id) === state.editingMessageId) {
+    content.appendChild(createEditContent(message));
+    const image = createMessageImage(message);
+    if (image) content.appendChild(image);
+  } else {
+    if (message.body) {
+      const body = document.createElement('div');
+      body.className = 'message-body';
+      body.textContent = message.body;
+      content.appendChild(body);
+    }
+
+    const image = createMessageImage(message);
+    if (image) content.appendChild(image);
   }
 
-  if (message.image_data && message.image_mime) {
-    const imageLink = document.createElement('a');
-    imageLink.className = 'message-image-link';
-    imageLink.href = `data:${message.image_mime};base64,${message.image_data}`;
-    imageLink.target = '_blank';
-    imageLink.rel = 'noopener';
-    imageLink.title = 'Open photo';
+  article.appendChild(content);
 
-    const image = document.createElement('img');
-    image.className = 'message-image';
-    image.src = imageLink.href;
-    image.alt = message.image_name || 'Shared photo';
-    image.loading = 'lazy';
-    imageLink.appendChild(image);
-    content.appendChild(imageLink);
+  if (!message.deleted_at && Number(message.id) !== state.editingMessageId) {
+    const reactionStrip = createReactionStrip(message);
+    if (reactionStrip) article.appendChild(reactionStrip);
   }
 
-  article.append(meta, content);
   return article;
 }
 
-function appendMessages(messages, { scroll = false } = {}) {
+function replaceMessageNode(message) {
+  const existing = el.messages.querySelector(`[data-message-id="${Number(message.id)}"]`);
+  const replacement = createMessageNode(message);
+  if (existing) existing.replaceWith(replacement);
+  else el.messages.appendChild(replacement);
+}
+
+function reconcileMessages(messages, { scroll = false } = {}) {
   if (!messages.length) return;
 
   const wasNearBottom = el.messages.scrollHeight - el.messages.scrollTop - el.messages.clientHeight < 120;
+  const empty = el.messages.querySelector('.empty-state');
+  if (empty) empty.remove();
 
   for (const message of messages) {
     const id = Number(message.id);
-    if (state.renderedMessageIds.has(id)) continue;
-    state.renderedMessageIds.add(id);
     state.lastMessageId = Math.max(state.lastMessageId, id);
-    el.messages.appendChild(createMessageNode(message));
+    state.messagesById.set(id, message);
+
+    if (id === state.editingMessageId && !message.deleted_at) {
+      continue;
+    }
+
+    if (state.renderedMessageIds.has(id)) {
+      replaceMessageNode(message);
+    } else {
+      state.renderedMessageIds.add(id);
+      el.messages.appendChild(createMessageNode(message));
+    }
   }
 
   state.seenConversationMessageIds[state.activeConversationId] = state.lastMessageId;
@@ -292,19 +547,26 @@ function appendMessages(messages, { scroll = false } = {}) {
 async function refreshMessages({ forceAll = false, scroll = false, silent = false } = {}) {
   if (!state.activeConversationId || state.fetchingMessages) return;
   state.fetchingMessages = true;
+  const conversationId = state.activeConversationId;
 
   try {
     if (!silent) setStatus('Checking for new messages…');
     const after = forceAll ? 0 : state.lastMessageId;
-    const messages = await api(`/api/conversations/${state.activeConversationId}/messages?after=${after}`);
+    const changedAfter = forceAll ? null : state.lastSyncAt;
+    const result = await fetchMessageUpdates(conversationId, after, changedAfter);
+
+    if (conversationId !== state.activeConversationId) return;
 
     if (forceAll) {
       el.messages.textContent = '';
       state.renderedMessageIds.clear();
+      state.messagesById.clear();
       state.lastMessageId = 0;
+      state.editingMessageId = null;
     }
 
-    appendMessages(messages, { scroll });
+    reconcileMessages(result.messages, { scroll });
+    state.lastSyncAt = result.syncTime;
 
     if (!state.renderedMessageIds.size) {
       el.messages.innerHTML = '<div class="empty-state">No messages yet. Start the conversation.</div>';
@@ -339,10 +601,7 @@ async function sendMessage() {
       })
     });
 
-    const empty = el.messages.querySelector('.empty-state');
-    if (empty) empty.remove();
-
-    appendMessages([message], { scroll: true });
+    reconcileMessages([message], { scroll: true });
     el.messageInput.value = '';
     clearPendingImage();
     await loadConversations({ preserveStatus: true });
@@ -352,6 +611,87 @@ async function sendMessage() {
     setStatus(error.message);
   } finally {
     el.sendBtn.disabled = false;
+  }
+}
+
+function beginEditMessage(messageId) {
+  const message = state.messagesById.get(messageId);
+  if (!message || !isMine(message) || message.deleted_at) return;
+
+  if (state.editingMessageId && state.editingMessageId !== messageId) {
+    const previous = state.messagesById.get(state.editingMessageId);
+    state.editingMessageId = null;
+    if (previous) replaceMessageNode(previous);
+  }
+
+  state.editingMessageId = messageId;
+  closeReactionPickers();
+  replaceMessageNode(message);
+}
+
+function cancelEditMessage(messageId) {
+  if (state.editingMessageId !== messageId) return;
+  state.editingMessageId = null;
+  const message = state.messagesById.get(messageId);
+  if (message) replaceMessageNode(message);
+}
+
+async function saveEditMessage(messageId, nextBody) {
+  const message = state.messagesById.get(messageId);
+  if (!message) return;
+
+  const body = nextBody.trim();
+  if (!body && !message.image_data) {
+    setStatus('A message cannot be empty.');
+    return;
+  }
+
+  setStatus('Saving edit…');
+  try {
+    const updated = await api(`/api/conversations/${state.activeConversationId}/messages/${messageId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ sender: state.displayName, body })
+    });
+    state.editingMessageId = null;
+    reconcileMessages([updated]);
+    await loadConversations({ preserveStatus: true });
+    setStatus('Message edited');
+  } catch (error) {
+    setStatus(error.message);
+  }
+}
+
+async function deleteMessage(messageId) {
+  const message = state.messagesById.get(messageId);
+  if (!message || !isMine(message) || message.deleted_at) return;
+  if (!window.confirm('Delete this message?')) return;
+
+  setStatus('Deleting message…');
+  try {
+    const deleted = await api(`/api/conversations/${state.activeConversationId}/messages/${messageId}`, {
+      method: 'DELETE',
+      body: JSON.stringify({ sender: state.displayName })
+    });
+    if (state.editingMessageId === messageId) state.editingMessageId = null;
+    reconcileMessages([deleted]);
+    await loadConversations({ preserveStatus: true });
+    setStatus('Message deleted');
+  } catch (error) {
+    setStatus(error.message);
+  }
+}
+
+async function toggleReaction(messageId, emoji) {
+  if (!REACTIONS.includes(emoji)) return;
+  closeReactionPickers();
+  try {
+    const updated = await api(`/api/conversations/${state.activeConversationId}/messages/${messageId}/reactions`, {
+      method: 'POST',
+      body: JSON.stringify({ sender: state.displayName, emoji })
+    });
+    reconcileMessages([updated]);
+  } catch (error) {
+    setStatus(error.message);
   }
 }
 
@@ -377,7 +717,10 @@ async function deleteConversation() {
     state.activeConversationId = null;
     localStorage.removeItem('qnc.activeConversationId');
     state.lastMessageId = 0;
+    state.lastSyncAt = null;
     state.renderedMessageIds.clear();
+    state.messagesById.clear();
+    state.editingMessageId = null;
     clearPendingImage();
 
     await loadConversations({ preserveStatus: true });
@@ -436,6 +779,9 @@ el.nameForm.addEventListener('submit', event => {
   localStorage.setItem('qnc.displayName', name);
   el.displayNameLabel.textContent = name;
   el.nameDialog.close();
+
+  // Ownership and reaction highlighting are display-name based in this simple v1.
+  for (const message of state.messagesById.values()) replaceMessageNode(message);
 });
 
 el.conversationForm.addEventListener('submit', async event => {
@@ -491,6 +837,10 @@ el.pollingToggle.addEventListener('change', () => {
   if (state.pollingEnabled) refreshMessages({ silent: true });
   restartPolling();
   restartConversationRefresh();
+});
+
+document.addEventListener('click', event => {
+  if (!event.target.closest('.reaction-control')) closeReactionPickers();
 });
 
 document.addEventListener('visibilitychange', () => {

@@ -2,6 +2,13 @@
 
 A small multi-user chat app designed for Render. It uses ordinary HTTP polling rather than WebSockets.
 
+## v1.4.1 hover-menu placement fix
+
+- Message containers now shrink-wrap their visible content instead of occupying a wide 760px block.
+- The Teams-style hover action bar now stays immediately above the associated response bubble.
+- Your own message action bar is anchored to the same nearby edge instead of appearing far across the chat pane.
+
+
 ## Included in v1
 
 - Multiple named conversations

@@ -216,7 +216,8 @@ button { cursor: pointer; }
 }
 
 .message {
-  max-width: 760px;
+  width: fit-content;
+  max-width: min(760px, 100%);
   margin-bottom: 16px;
 }
 
@@ -442,8 +443,8 @@ dialog::backdrop { background: rgba(12, 28, 46, .55); }
 }
 
 .message.mine .message-actions {
-  left: 6px;
-  right: auto;
+  right: 6px;
+  left: auto;
 }
 
 .message:hover .message-actions,

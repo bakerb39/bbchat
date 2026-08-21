@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Quick Notes Chat</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand-row">
+        <div>
+          <div class="brand">Quick Notes Chat</div>
+          <div class="subtitle">Small-group conversations</div>
+        </div>
+        <button id="newConversationBtn" class="icon-button" type="button" title="New conversation" aria-label="New conversation">+</button>
+      </div>
+
+      <div class="identity-row">
+        <span>Signed in as <strong id="displayNameLabel"></strong></span>
+        <button id="changeNameBtn" class="text-button" type="button">Change</button>
+      </div>
+
+      <div id="conversationList" class="conversation-list" aria-label="Conversations"></div>
+    </aside>
+
+    <main class="chat-pane">
+      <header class="chat-header">
+        <div class="chat-title-wrap">
+          <h1 id="conversationTitle">Select a conversation</h1>
+          <div id="connectionStatus" class="status">Ready</div>
+        </div>
+        <div class="header-actions">
+          <label class="toggle-label" for="pollingToggle">
+            <input id="pollingToggle" type="checkbox">
+            <span>Auto-refresh</span>
+          </label>
+          <button id="refreshBtn" class="secondary-button" type="button">Refresh</button>
+        </div>
+      </header>
+
+      <section id="messages" class="messages" aria-live="polite">
+        <div class="empty-state">Choose a conversation to begin.</div>
+      </section>
+
+      <div class="composer">
+        <label class="sr-only" for="messageInput">Message</label>
+        <textarea id="messageInput" rows="2" maxlength="4000" placeholder="Type a message…" disabled></textarea>
+        <button id="sendBtn" class="primary-button" type="button" disabled>Send</button>
+      </div>
+    </main>
+  </div>
+
+  <dialog id="nameDialog">
+    <form method="dialog" class="dialog-card" id="nameForm">
+      <h2>Your display name</h2>
+      <p>This initial version uses a simple name instead of account authentication.</p>
+      <label for="nameInput">Name</label>
+      <input id="nameInput" maxlength="80" autocomplete="name" required>
+      <div class="dialog-actions">
+        <button class="primary-button" value="default" type="submit">Continue</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="conversationDialog">
+    <form method="dialog" class="dialog-card" id="conversationForm">
+      <h2>New conversation</h2>
+      <label for="conversationInput">Conversation name</label>
+      <input id="conversationInput" maxlength="120" placeholder="e.g. AEP mapping" required>
+      <div class="dialog-actions">
+        <button id="cancelConversationBtn" class="secondary-button" value="cancel" type="button">Cancel</button>
+        <button class="primary-button" value="default" type="submit">Create</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

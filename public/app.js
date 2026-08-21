@@ -28,7 +28,8 @@ const state = {
   fetchingMessages: false,
   pendingImage: null,
   editingMessageId: null,
-  cryptoKeys: new Map()
+  cryptoKeys: new Map(),
+  cryptoPassphrases: new Map()
 };
 
 const el = {
@@ -91,16 +92,20 @@ async function deriveConversationKey(passphrase, conversationId) {
 
 async function getConversationKey(conversationId, { promptIfMissing = false } = {}) {
   if (state.cryptoKeys.has(conversationId)) return state.cryptoKeys.get(conversationId);
-  let passphrase = sessionStorage.getItem(passphraseStorageKey(conversationId)) || '';
+  let passphrase = state.cryptoPassphrases.get(Number(conversationId)) || sessionStorage.getItem(passphraseStorageKey(conversationId)) || '';
   if (!passphrase && promptIfMissing) {
     passphrase = window.prompt('Enter the shared encryption passphrase for this chat. Share it with the other participant outside BB Chat. It is kept only for this browser session.') || '';
     if (passphrase && passphrase.length < 10) {
       setStatus('Use an encryption passphrase of at least 10 characters.');
       return null;
     }
-    if (passphrase) sessionStorage.setItem(passphraseStorageKey(conversationId), passphrase);
+    if (passphrase) {
+      state.cryptoPassphrases.set(Number(conversationId), passphrase);
+      sessionStorage.setItem(passphraseStorageKey(conversationId), passphrase);
+    }
   }
   if (!passphrase) return null;
+  state.cryptoPassphrases.set(Number(conversationId), passphrase);
   const key = await deriveConversationKey(passphrase, conversationId);
   state.cryptoKeys.set(conversationId, key);
   return key;
@@ -909,8 +914,9 @@ el.encryptionBtn.addEventListener('click', async () => {
   const passphrase = window.prompt('Enter the shared encryption passphrase for this chat (at least 10 characters). It is kept only for this browser session.') || '';
   if (!passphrase) return;
   if (passphrase.length < 10) return setStatus('Use an encryption passphrase of at least 10 characters.');
+  state.cryptoPassphrases.set(Number(state.activeConversationId), passphrase);
   sessionStorage.setItem(passphraseStorageKey(state.activeConversationId), passphrase);
-  state.cryptoKeys.delete(state.activeConversationId);
+  state.cryptoKeys.delete(Number(state.activeConversationId));
   await getConversationKey(state.activeConversationId);
   await refreshMessages({ forceAll: true, scroll: false, silent: true });
   setStatus('🔒 End-to-end encryption unlocked for this session');

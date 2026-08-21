@@ -12,6 +12,18 @@ const ALLOWED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'i
 
 app.disable('x-powered-by');
 app.use(express.json({ limit: '8mb' }));
+
+// Always revalidate the app shell so a newly deployed HTML page points to the
+// current versioned JavaScript and CSS instead of an older cached client.
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/api/') && (req.path === '/' || req.path.endsWith('.html') || !path.extname(req.path))) {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+  }
+  next();
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 let pool = null;

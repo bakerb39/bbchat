@@ -33,6 +33,11 @@ bbchat_messages
 
 The app creates only those tables and its own `idx_bbchat_messages_conversation_id_id` index on startup.
 
+
+## Cache refresh behavior
+
+Version 1.3 adds frontend cache busting. The HTML shell is sent with no-cache headers and references versioned JavaScript/CSS URLs (`?v=1.3.0`). After a Render deploy, opening or refreshing the app on another computer should load the newly deployed frontend automatically rather than continuing to use an older cached client.
+
 ## Local run
 
 ```bash
